@@ -1481,6 +1481,47 @@ mod test {
         assert!(build_file_content.contains(r#"name = "names-0.13.0__names","#));
     }
 
+    /// Workspace members get no `@<repo>__<name>-<ver>` repo, so the alias renderer must skip such
+    /// dependencies.  A `build.rs` injects a self-dep which exercises this path.
+    #[test]
+    fn render_aliases_skips_workspace_member_self_dep() {
+        let annotations = Annotations::new(
+            test::metadata::workspace_build_scripts_deps(),
+            &None,
+            test::lockfile::workspace_build_scripts_deps(),
+            Config {
+                generate_build_scripts: true,
+                ..Config::default()
+            },
+            Utf8Path::new("/tmp/bazelworkspace"),
+        )
+        .unwrap();
+        let context = Context::new(annotations, false).unwrap();
+
+        // Precondition: `child` is a workspace member appearing in its own
+        // `workspace_member_deps()` (self-dep injected for `build.rs`).
+        let child_id = CrateId::new("child".to_owned(), VERSION_ZERO_ONE_ZERO);
+        assert!(context.workspace_members.contains_key(&child_id));
+        assert!(context
+            .workspace_member_deps()
+            .iter()
+            .any(|dep| dep.id == child_id));
+
+        let renderer = Renderer::new(mock_render_config(None), mock_supported_platform_triples());
+        let output = renderer.render(&context, None).unwrap();
+
+        let build_file_content = output.get(&PathBuf::from("BUILD.bazel")).unwrap();
+
+        assert!(
+            !build_file_content.contains(r#"name = "child-0.1.0""#),
+            "unexpected workspace-member alias:\n```\n{build_file_content}```",
+        );
+        assert!(
+            !build_file_content.contains("__child-0.1.0"),
+            "unexpected `@..__child-0.1.0` reference:\n```\n{build_file_content}```",
+        );
+    }
+
     #[test]
     fn render_crate_repositories() {
         let mut context = Context::default();
@@ -2084,15 +2125,16 @@ mod test {
     #[test]
     fn crate_with_ambiguous_rename() {
         let mut context = Context::default();
-        let crate_id = CrateId::new("mock_crate".to_owned(), VERSION_ZERO_ONE_ZERO);
+        let workspace_id = CrateId::new("mock_crate".to_owned(), VERSION_ZERO_ONE_ZERO);
+        let other_id = CrateId::new("other_crate".to_owned(), VERSION_ZERO_ONE_ZERO);
         context
             .workspace_members
-            .insert(crate_id.clone(), "mock_crate".into());
+            .insert(workspace_id.clone(), "mock_crate".into());
         context.crates.insert(
-            crate_id.clone(),
+            workspace_id.clone(),
             CrateContext {
-                name: crate_id.name.clone(),
-                version: crate_id.version.clone(),
+                name: workspace_id.name.clone(),
+                version: workspace_id.version.clone(),
                 package_url: Some("http://www.mock_crate.com/".to_owned()),
                 license_ids: BTreeSet::from(["Apache-2.0".to_owned(), "MIT".to_owned()]),
                 license_file: None,
@@ -2103,15 +2145,36 @@ mod test {
                 library_target_name: Some("library_name".into()),
                 common_attrs: CommonAttributes {
                     deps: Select::from_value(BTreeSet::from([CrateDependency {
-                        id: crate_id,
+                        id: other_id.clone(),
                         target: "target".into(),
                         // this is identical to what we have in the `name` attribute
                         // which creates conflict in `render_module_build_file`
-                        alias: Some("mock_crate".into()),
+                        alias: Some("other_crate".into()),
                         local_path: None,
                     }])),
                     ..Default::default()
                 },
+                build_script_attrs: None,
+                repository: None,
+                license: None,
+                alias_rule: None,
+                override_targets: BTreeMap::default(),
+            },
+        );
+        context.crates.insert(
+            other_id.clone(),
+            CrateContext {
+                name: other_id.name.clone(),
+                version: other_id.version.clone(),
+                package_url: None,
+                license_ids: BTreeSet::default(),
+                license_file: None,
+                additive_build_file_content: None,
+                disable_pipelining: false,
+                extra_aliased_targets: BTreeMap::default(),
+                targets: BTreeSet::from([Rule::Library(mock_target_attributes())]),
+                library_target_name: Some("library_name".into()),
+                common_attrs: CommonAttributes::default(),
                 build_script_attrs: None,
                 repository: None,
                 license: None,
@@ -2164,14 +2227,14 @@ mod test {
 
             # Workspace Member Dependencies
             alias(
-                name = "mock_crate-0.1.0",
-                actual = "@test_rendering__mock_crate-0.1.0//:library_name",
+                name = "other_crate-0.1.0",
+                actual = "@test_rendering__other_crate-0.1.0//:library_name",
                 tags = ["manual"],
             )
 
             alias(
-                name = "mock_crate",
-                actual = "@test_rendering__mock_crate-0.1.0//:library_name",
+                name = "other_crate",
+                actual = "@test_rendering__other_crate-0.1.0//:library_name",
                 tags = ["manual"],
             )
         "#};
