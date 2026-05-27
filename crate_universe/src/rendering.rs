@@ -203,6 +203,14 @@ impl Renderer {
         // An `alias` for each direct dependency of a workspace member crate.
         let mut dependencies = Vec::new();
         for dep in context.workspace_member_deps() {
+            // Skip deps whose target is itself a workspace member (e.g. the self-dep injected for
+            // the build script of a workspace member).  Workspace member repositories are not
+            // defined, so emitting an alias for them would dangle.
+            //
+            // This mirrors the same guard in partials/module/{aliases_map,deps_map}.j2.
+            if context.workspace_members.contains_key(&dep.id) {
+                continue;
+            }
             let krate = &context.crates[&dep.id];
             let alias_rule = krate
                 .alias_rule
